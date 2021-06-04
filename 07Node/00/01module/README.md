@@ -239,6 +239,8 @@ Module._load = function(request, parent, isMain) {
 
 ```js
 Module._load = function(request, parent, isMain) {
+  ...
+  const filename = Module._resolveFilename(request, parent, isMain);
 	...
 	const module = cachedModule || new Module(filename, parent);
   ...
@@ -252,5 +254,201 @@ Module._load = function(request, parent, isMain) {
 ```js
 // Given a file name, pass it to the proper extension handler.
 Module.prototype.load = function(filename) {
+  ...
+  Module._extensions[extension](this, filename);
 ```
 
+策略模式，对不同的文件使用不同loader
+
+![image-20210603092027679](http://picbed.sedationh.cn/image-20210603092027679.png)
+
+
+
+```js
+// Native extension for .js
+Module._extensions['.js'] = function(module, filename) {
+  if (filename.endsWith('.js')) {
+    ...
+    content = fs.readFileSync(filename, 'utf8');
+    ....
+  module._compile(content, filename);
+```
+
+![image-20210603092422845](http://picbed.sedationh.cn/image-20210603092422845.png)
+
+content中的文件内容就是requrie的源代码
+
+
+
+```js
+// Run the file contents in the correct scope or sandbox. Expose
+// the correct helper variables (require, module, exports) to
+// the file.
+// Returns exception, if any.
+Module.prototype._compile = function(content, filename) {
+  ...
+  const compiledWrapper = wrapSafe(filename, content, this);
+```
+
+![image-20210603092727791](http://picbed.sedationh.cn/image-20210603092727791.png) 
+
+包装函数的获取, 注意包装后的函数有几个参数
+
+exports require module `__dirname ` `__filename`
+
+因为这个原因，module在执行的时候才可以直接拿到他们
+
+```js
+// Run the file contents in the correct scope or sandbox. Expose
+// the correct helper variables (require, module, exports) to
+// the file.
+// Returns exception, if any.
+Module.prototype._compile = function(content, filename) {
+  ...
+  const compiledWrapper = wrapSafe(filename, content, this);
+  ...
+  const dirname = path.dirname(filename);
+  const require = makeRequireFunction(this, redirects);
+  let result;
+  const exports = this.exports;
+  const thisValue = exports;
+  const module = this;
+  if (requireDepth === 0) statCache = new Map();
+  if (inspectorWrapper) {
+    result = inspectorWrapper(compiledWrapper, thisValue, exports,
+                              require, module, filename, dirname);
+  } else {
+    result = compiledWrapper.call(thisValue, exports, require, module,
+                                  filename, dirname);
+  }
+  ...
+  return result
+```
+
+因此可知，module在执行的时候this 指向的，就是module.exports
+
+执行compilerWrapper.call...
+
+![image-20210603093342338](http://picbed.sedationh.cn/image-20210603093342338.png)
+
+
+
+上述过程中有一处还没看清
+
+就是包装函数`wrapSafe`那里
+
+其使用了`compileFunction`方法
+
+`const { compileFunction } = internalBinding('contextify');`
+
+这是一个内部的方法，关键作用是创建一个virtual box来执行代码
+
+这里的需求是，require的代码的namespace 和 调用require的namespace应该是隔离开的
+
+
+
+## compileFunction 分析
+
+包装函数、要分隔作用域、执行函数
+
+1. 从文本内容到可执行函数
+
+使用function进行拼接
+
+```js
+"(function (exports, require, module, __filename, __dirname){" + content + "})""
+```
+
+2. 分隔作用域
+
+使用`vm.runInThisContext()`
+
+> `vm.runInThisContext()` compiles `code`, runs it within the context of the current `global` and returns the result. Running code does not have access to local scope, but does have access to the current `global` object.
+>
+> If `options` is a string, then it specifies the filename.
+>
+> The following example illustrates using both `vm.runInThisContext()` and the JavaScript [`eval()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/eval) function to run the same code:
+
+```js
+const vm = require('vm');
+let localVar = 'initial value';
+
+const vmResult = vm.runInThisContext('localVar = "vm";');
+console.log(`vmResult: '${vmResult}', localVar: '${localVar}'`);
+// Prints: vmResult: 'vm', localVar: 'initial value'
+
+const evalResult = eval('localVar = "eval";');
+console.log(`evalResult: '${evalResult}', localVar: '${localVar}'`);
+// Prints: evalResult: 'eval', localVar: 'eval'
+```
+
+debug看一下执行流程
+
+debug -> `const vmResult = vm.runInThisContext('localVar = "vm";')`
+
+
+
+```js
+function runInThisContext(code, options) {
+  if (typeof options === 'string') {
+    options = { filename: options };
+  }
+  return createScript(code, options).runInThisContext(options);
+}
+```
+
+创建 scirpt 再通过 创建的script进行runInThisContext的调用
+
+这个时候的this就指向script
+
+scirpt的`runInThisContext` 重写了继承于`ContextifyScript`的`runInThisContext`
+
+```js
+class Script extends ContextifyScript {
+  ...
+  runInThisContext(options) {
+    const { breakOnSigint, args } = getRunInContextArgs(options);
+    if (breakOnSigint && process.listenerCount('SIGINT') > 0) {
+      return sigintHandlersWrap(super.runInThisContext, this, args);
+    }
+    return super.runInThisContext(...args);
+  }
+```
+
+```js
+const {
+  ContextifyScript,
+  MicrotaskQueue,
+  makeContext,
+  isContext: _isContext,
+  constants,
+  compileFunction: _compileFunction,
+  measureMemory: _measureMemory,
+} = internalBinding('contextify');
+```
+
+执行这里，进入vm环境
+
+```js
+return super.runInThisContext(...args);
+```
+
+![image-20210603103217684](http://picbed.sedationh.cn/image-20210603103217684.png)
+
+
+
+而在eval中的环境
+
+![image-20210603103329612](http://picbed.sedationh.cn/image-20210603103329612.png)
+
+
+
+这里没有使用strict mode
+
+![image-20210603103619250](http://picbed.sedationh.cn/image-20210603103619250.png)
+
+如果使用strict 
+
+![image-20210603103721149](http://picbed.sedationh.cn/image-20210603103721149.png)
+
+会为eval的执行创建相应的eval VO 环境

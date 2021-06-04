@@ -10,7 +10,9 @@ Natives modules
 
 
 
-Bindings 与 c++等较为基础的语言 打交道
+internalBinding 与 c++等较为基础的语言 打交道
+
+`const { compileFunction } = internalBinding('contextify');`
 
 
 

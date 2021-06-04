@@ -6,6 +6,11 @@ module.exports = {
   foo: 'foo',
 }
 
+let name = 1
+
+setTimeout(() => {
+  console.log(name)
+}, 1000);
 // console.log(module)
 
 console.log('main', require.main)
